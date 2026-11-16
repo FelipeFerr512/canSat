@@ -1,12 +1,15 @@
+
 """
 Estación terrena LoRa - Interfaz de telemetría
 Lee por puerto serie lo que imprime la Heltec V3 (115200 baudios)
-y manda los comandos: Sx, DHT, BMP, GY, TALLON, TALLOFF, FLOOR.
+y manda los comandos remotos: Sx y FLOOR. Los toggles de sensores solo
+ocultan o muestran lecturas localmente.
 
 Requisitos:  pip install pyserial
 Uso:         python interfaz_telemetria.py
 """
 import queue
+import math
 import re
 import threading
 import time
@@ -61,6 +64,23 @@ class App:
         self.stop = threading.Event()
         self.cola = queue.Queue()
         self.ultimo_rx = None
+        self.historial_acc = []
+        self.historial_temp = []
+        self.historial_hum = []
+        self.muestras_altura = []
+        self.cda_activo = False
+        self.gravedad_base = None
+        self.muestras_calibracion = []
+        self.muestra_mov_anterior = None
+        self.velocidad_ejes = [0.0, 0.0, 0.0]
+        self.distancia_ejes = [0.0, 0.0, 0.0]
+        self.mostrar_componentes = {"BMP": tk.BooleanVar(value=True),
+                                    "DHT": tk.BooleanVar(value=True),
+                                    "GY": tk.BooleanVar(value=True)}
+        self.marcos_sensor = {"BMP": [], "DHT": [], "GY": []}
+        self.mostrar_ejes = {"X": tk.BooleanVar(value=True),
+                             "Y": tk.BooleanVar(value=True),
+                             "Z": tk.BooleanVar(value=True)}
 
         self.construir()
         self.tick()
@@ -108,12 +128,13 @@ class App:
     # ------------------------------------------------------ construccion
     def construir(self):
         r = self.root
-        r.columnconfigure(0, weight=1)
+        for col in range(3):
+            r.columnconfigure(col, weight=1, uniform="inferior")
         r.rowconfigure(3, weight=1)
 
         # ---- Cabecera
         cab = tk.Frame(r, bg=BG)
-        cab.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 10))
+        cab.grid(row=0, column=0, columnspan=3, sticky="ew", padx=24, pady=(20, 10))
         cab.columnconfigure(0, weight=1)
 
         izq = tk.Frame(cab, bg=BG)
@@ -139,40 +160,68 @@ class App:
 
         # ---- Datos principales
         medio = tk.Frame(r, bg=BG)
-        medio.grid(row=1, column=0, sticky="ew", padx=24, pady=6)
-        medio.columnconfigure(0, weight=11, uniform="a")
-        medio.columnconfigure(1, weight=10, uniform="a")
+        medio.grid(row=1, column=0, columnspan=3, sticky="ew", padx=24, pady=6)
+        medio.columnconfigure(0, weight=4, uniform="a")
+        medio.columnconfigure(1, weight=9, uniform="a")
+        medio.columnconfigure(2, weight=6, uniform="a")
 
         alt = self.panel(medio)
-        alt.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
-        self.etiqueta(alt, "ALTURA RELATIVA").pack(anchor="w", padx=22, pady=(16, 0))
-        fila = tk.Frame(alt, bg=PANEL)
-        fila.pack(anchor="w", padx=22, pady=(10, 6))
-        self.lbl_rel = tk.Label(fila, text="---", bg=PANEL, fg=CIAN, font=("Segoe UI", 54, "bold"))
+        alt.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.marcos_sensor["BMP"].append(alt)
+        self.etiqueta(alt, "ALTURA RELATIVA").pack(anchor="w", padx=14, pady=(12, 0))
+        fila_alt = tk.Frame(alt, bg=PANEL)
+        fila_alt.pack(fill="x", padx=14, pady=(2, 5))
+        self.lbl_rel = tk.Label(fila_alt, text="---", bg=PANEL, fg=CIAN,
+                                font=("Segoe UI", 32, "bold"))
         self.lbl_rel.pack(side="left")
-        tk.Label(fila, text=" m", bg=PANEL, fg=GRIS,
-                 font=("Segoe UI", 20)).pack(side="left", anchor="s", pady=(0, 12))
+        tk.Label(fila_alt, text=" m", bg=PANEL, fg=GRIS,
+                 font=("Segoe UI", 14)).pack(side="left", anchor="s", pady=(0, 6))
         sub = tk.Frame(alt, bg=PANEL)
-        sub.pack(anchor="w", padx=22, pady=(10, 16))
+        sub.pack(anchor="w", padx=14, pady=(2, 10))
         self.lbl_abs = self.sub_dato(sub, "Altura absoluta", 0)
-        self.lbl_piso = self.sub_dato(sub, "Piso definido en", 1)
+        self.lbl_piso = self.sub_dato(sub, "Piso definido", 1)
 
         grid = tk.Frame(medio, bg=BG)
-        grid.grid(row=0, column=1, sticky="nsew")
+        grid.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
         grid.columnconfigure(0, weight=1, uniform="g")
         grid.columnconfigure(1, weight=1, uniform="g")
         grid.rowconfigure(0, weight=1, uniform="f")
         grid.rowconfigure(1, weight=1, uniform="f")
 
+        recorrido = self.panel(medio)
+        recorrido.grid(row=0, column=2, sticky="nsew")
+        self.etiqueta(recorrido, "DISTANCIA RECORRIDA · CDA").pack(
+            anchor="w", padx=14, pady=(12, 6))
+        self.lbl_dist = {}
+        for eje, color in (("X", "#4c9aff"), ("Y", "#ff5c5c"), ("Z", "#48d17a")):
+            fila = tk.Frame(recorrido, bg=PANEL)
+            fila.pack(fill="x", padx=14, pady=2)
+            tk.Label(fila, text=eje, bg=PANEL, fg=color,
+                     font=("Segoe UI", 11, "bold"), width=3, anchor="w").pack(side="left")
+            self.lbl_dist[eje] = tk.Label(fila, text="--- m", bg=PANEL, fg=TEXTO,
+                                          font=("Segoe UI", 12, "bold"))
+            self.lbl_dist[eje].pack(side="left")
+        self.lbl_velocidad = tk.Label(recorrido, text="Rapidez: --- m/s",
+                                      bg=PANEL, fg=CIAN,
+                                      font=("Segoe UI", 13, "bold"))
+        self.lbl_velocidad.pack(anchor="w", padx=14, pady=(8, 0))
+        self.btn_cda = self.boton(recorrido, "CDA · iniciar medición",
+                                  self.activar_cda, primario=True)
+        self.btn_cda.pack(anchor="w", padx=14, pady=(8, 10))
+
         p, self.lbl_temp = self.tarjeta_dato(grid, "TEMPERATURA", "°C", "BMP180")
         p.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
+        self.marcos_sensor["BMP"].append(p)
         p, self.lbl_pres = self.tarjeta_dato(grid, "PRESIÓN", "hPa", "BMP180")
         p.grid(row=0, column=1, sticky="nsew", pady=(0, 8))
+        self.marcos_sensor["BMP"].append(p)
         p, self.lbl_hum = self.tarjeta_dato(grid, "HUMEDAD", "%", "DHT11")
         p.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        self.marcos_sensor["DHT"].append(p)
 
         pacc = self.panel(grid)
         pacc.grid(row=1, column=1, sticky="nsew")
+        self.marcos_sensor["GY"].append(pacc)
         self.etiqueta(pacc, "ACELERACIÓN (g)").pack(anchor="w", padx=16, pady=(10, 0))
         tk.Label(pacc, text="GY-521", bg=PANEL, fg=GRIS,
                  font=("Segoe UI", 9)).place(relx=1.0, y=12, x=-14, anchor="ne")
@@ -189,7 +238,7 @@ class App:
 
         # ---- Controles
         ctl = tk.Frame(r, bg=BG)
-        ctl.grid(row=2, column=0, sticky="ew", padx=24, pady=6)
+        ctl.grid(row=2, column=0, columnspan=3, sticky="ew", padx=24, pady=6)
         for i in range(3):
             ctl.columnconfigure(i, weight=1, uniform="c")
 
@@ -201,25 +250,30 @@ class App:
         fila.pack(fill="x", padx=18)
         self.btn_sensor = {}
         for nombre, etq in (("DHT", "DHT11"), ("BMP", "BMP180"), ("GY", "GY-521")):
-            b = self.boton(fila, f"{etq}: --", lambda n=nombre: self.enviar(n))
-            b.configure(fg=GRIS)
+            b = tk.Checkbutton(
+                fila, text=etq, variable=self.mostrar_componentes[nombre],
+                command=lambda n=nombre: self.alternar_vista_sensor(n),
+                bg=PANEL, fg=TEXTO, activebackground=PANEL,
+                activeforeground=TEXTO, selectcolor=BTN,
+                font=("Segoe UI", 9, "bold")
+            )
             b.pack(side="left", expand=True, fill="x", padx=(0, 6))
-            self.btn_sensor[nombre] = (b, etq)
+            self.btn_sensor[nombre] = b
         fila2 = tk.Frame(ps, bg=PANEL)
         fila2.pack(fill="x", padx=18, pady=(8, 14))
-        self.boton(fila2, "Todos ON", lambda: self.enviar("TALLON")).pack(
+        self.boton(fila2, "Mostrar todos", lambda: self.set_todos_visibles(True)).pack(
             side="left", expand=True, fill="x", padx=(0, 6))
-        self.boton(fila2, "Todos OFF", lambda: self.enviar("TALLOFF")).pack(
+        self.boton(fila2, "Ocultar todos", lambda: self.set_todos_visibles(False)).pack(
             side="left", expand=True, fill="x", padx=(0, 6))
 
         # Servo
         pv = self.panel(ctl)
         pv.grid(row=0, column=1, sticky="nsew", padx=(0, 16))
-        self.etiqueta(pv, "SERVO (SX)").pack(anchor="w", padx=18, pady=(14, 8))
+        self.etiqueta(pv, "SG90 360 · SENTIDO/VELOCIDAD").pack(anchor="w", padx=18, pady=(14, 8))
         fila = tk.Frame(pv, bg=PANEL)
         fila.pack(fill="x", padx=18)
-        for ang in (0, 90, 180):
-            self.boton(fila, f"{ang}°", lambda a=ang: self.enviar(f"S{a}")).pack(
+        for ang, texto in ((0, "S0"), (90, "S90 · detener"), (180, "S180")):
+            self.boton(fila, texto, lambda a=ang: self.enviar(f"S{a}")).pack(
                 side="left", expand=True, fill="x", padx=(0, 6))
         fila2 = tk.Frame(pv, bg=PANEL)
         fila2.pack(fill="x", padx=18, pady=(8, 6))
@@ -229,7 +283,7 @@ class App:
                  font=("Segoe UI", 12)).pack(side="left", ipady=5, padx=(0, 8))
         self.boton(fila2, "Mover", self.mover_servo, primario=True).pack(
             side="left", expand=True, fill="x", padx=(0, 6))
-        self.lbl_servo = tk.Label(pv, text="Posición actual: --", bg=PANEL, fg=GRIS,
+        self.lbl_servo = tk.Label(pv, text="Último valor enviado: --", bg=PANEL, fg=GRIS,
                                   font=("Segoe UI", 10))
         self.lbl_servo.pack(anchor="w", padx=18, pady=(0, 14))
 
@@ -251,17 +305,73 @@ class App:
                                 font=("Segoe UI", 10))
         self.lbl_cmd.pack(anchor="w", padx=18, pady=(8, 14))
 
-        # ---- Registro
+        # ---- Tres graficos compactos en la franja inferior
+        tele = self.panel(r)
+        tele.grid(row=3, column=0, sticky="nsew", padx=(24, 6), pady=(6, 8))
+        self.etiqueta(tele, "ACELERACIÓN · última muestra (nodo: 2 s)").pack(
+            anchor="w", padx=12, pady=(9, 3))
+        graf = tk.Frame(tele, bg=PANEL)
+        graf.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        controles = tk.Frame(graf, bg=PANEL)
+        controles.pack(fill="x", anchor="w")
+        colores = {"X": "#4c9aff", "Y": "#ff5c5c", "Z": "#48d17a"}
+        for eje in ("X", "Y", "Z"):
+            tk.Checkbutton(
+                controles, text=eje, variable=self.mostrar_ejes[eje],
+                command=self.dibujar_grafico, bg=PANEL, fg=colores[eje],
+                activebackground=PANEL, activeforeground=colores[eje],
+                selectcolor=BG, font=("Segoe UI", 9, "bold")
+            ).pack(side="left", padx=(0, 8))
+
+        self.canvas_acc = tk.Canvas(
+            graf, height=125, bg="#111820", highlightthickness=1,
+            highlightbackground=BORDE
+        )
+        self.canvas_acc.pack(fill="both", expand=True, pady=(2, 0))
+        self.canvas_acc.bind("<Configure>", lambda _e: self.dibujar_grafico())
+        self.marcos_sensor["GY"].append(tele)
+
+        metricas = tk.Frame(tele, bg=PANEL)
+        metricas.pack(fill="x", padx=12, pady=(0, 8))
+        self.etiqueta(metricas, "ACELERACIÓN TOTAL").pack(side="left")
+        self.lbl_acc_total = tk.Label(
+            metricas, text="--- g | --- m/s²", bg=PANEL, fg=TEXTO,
+            font=("Segoe UI", 11, "bold")
+        )
+        self.lbl_acc_total.pack(side="left", padx=(6, 14))
+        self.etiqueta(metricas, "IMPACTO").pack(side="left")
+        self.lbl_impacto = tk.Label(
+            metricas, text="", bg=PANEL, fg=GRIS, font=("Segoe UI", 12, "bold")
+        )
+        self.lbl_impacto.pack_forget()
+
+        self.canvas_temp = self.crear_grafico_simple(r, 3, 1, "TEMPERATURA · 1 s", "°C", "#ffb454")
+        self.canvas_hum = self.crear_grafico_simple(r, 3, 2, "HUMEDAD · 1 s", "%", "#4cc9f0")
+        self.marcos_sensor["BMP"].append(self.canvas_temp.master)
+        self.marcos_sensor["DHT"].append(self.canvas_hum.master)
+
+        # ---- Registro debajo de los graficos
         reg = self.panel(r)
-        reg.grid(row=3, column=0, sticky="nsew", padx=24, pady=(6, 20))
-        self.etiqueta(reg, "REGISTRO").pack(anchor="w", padx=18, pady=(12, 4))
-        self.txt = tk.Text(reg, bg=PANEL, fg="#c5d0db", font=("Consolas", 10), relief="flat",
-                           height=5, wrap="none", state="disabled", highlightthickness=0)
-        self.txt.pack(fill="both", expand=True, padx=18, pady=(0, 12))
+        reg.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=24, pady=(0, 14))
+        self.etiqueta(reg, "REGISTRO").pack(anchor="w", padx=18, pady=(6, 2))
+        self.txt = tk.Text(reg, bg=PANEL, fg="#c5d0db", font=("Consolas", 9), relief="flat",
+                           height=3, wrap="none", state="disabled", highlightthickness=0)
+        self.txt.pack(fill="both", expand=True, padx=18, pady=(0, 6))
+
+    def crear_grafico_simple(self, parent, fila, columna, titulo, unidad, color):
+        panel = self.panel(parent)
+        panel.grid(row=fila, column=columna, sticky="nsew", padx=6, pady=(6, 8))
+        self.etiqueta(panel, titulo).pack(anchor="w", padx=12, pady=(9, 3))
+        canvas = tk.Canvas(panel, height=125, bg="#111820", highlightthickness=1,
+                           highlightbackground=BORDE)
+        canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        canvas.bind("<Configure>", lambda _e, c=canvas, k=unidad, col=color:
+                    self.dibujar_grafico_simple(c, k, col))
+        return canvas
 
     def sub_dato(self, parent, titulo, col):
         f = tk.Frame(parent, bg=PANEL)
-        f.grid(row=0, column=col, padx=(0, 32), sticky="w")
+        f.grid(row=0, column=col, padx=(0, 12), sticky="w")
         tk.Label(f, text=titulo, bg=PANEL, fg=GRIS, font=("Segoe UI", 10)).pack(anchor="w")
         lbl = tk.Label(f, text="---", bg=PANEL, fg=TEXTO, font=("Segoe UI", 14, "bold"))
         lbl.pack(anchor="w")
@@ -339,15 +449,80 @@ class App:
             return
         self.enviar(f"S{a}")
 
+    def activar_cda(self):
+        # CDA inicia una nueva estimacion local desde el proximo dato del GY.
+        self.cda_activo = True
+        self.gravedad_base = None
+        self.muestras_calibracion = []
+        self.muestra_mov_anterior = None
+        self.velocidad_ejes = [0.0, 0.0, 0.0]
+        self.distancia_ejes = [0.0, 0.0, 0.0]
+        self.muestras_altura.clear()
+        for eje in ("X", "Y", "Z"):
+            self.lbl_dist[eje].configure(text="0.00 m")
+        self.lbl_velocidad.configure(text="Velocidad: 0.00 m/s")
+        self.lbl_impacto.configure(text="Esperando descenso…", fg=GRIS)
+        self.lbl_impacto.pack(side="left", padx=(6, 0))
+        self.btn_cda.configure(text="CDA · reiniciar medición")
+        self.lbl_cmd.configure(text="Último comando: CDA (medición iniciada)")
+
+    def integrar_recorrido(self, ahora, valores_g):
+        if not self.cda_activo:
+            return
+        gravedad = 9.80665
+        vector = [v * gravedad for v in valores_g]
+        if self.gravedad_base is None:
+            # Promedia varias muestras iniciales para estimar el sesgo/gravedad en reposo.
+            self.muestras_calibracion.append(vector)
+            if len(self.muestras_calibracion) < 5:
+                self.lbl_velocidad.configure(text="Calibrando en reposo…")
+                return
+            self.gravedad_base = [
+                sum(m[i] for m in self.muestras_calibracion) / len(self.muestras_calibracion)
+                for i in range(3)
+            ]
+            self.muestra_mov_anterior = (ahora, [0.0, 0.0, 0.0])
+            self.lbl_velocidad.configure(text="Rapidez: 0.00 m/s")
+            return
+        anterior_t, anterior_a = self.muestra_mov_anterior
+        dt = ahora - anterior_t
+        if dt <= 0 or dt > 3:
+            self.muestra_mov_anterior = (ahora, [v - b for v, b in zip(vector, self.gravedad_base)])
+            return
+        aceleracion = [v - b for v, b in zip(vector, self.gravedad_base)]
+        # Zona muerta para ruido del acelerometro: sin movimiento medible, no integrar.
+        if math.sqrt(sum(a * a for a in aceleracion)) < 1.5:  # ~0.15 g: inmovil/ruido
+            # Adaptacion lenta del vector de gravedad mientras esta quieto.
+            self.gravedad_base = [0.98 * b + 0.02 * v
+                                  for b, v in zip(self.gravedad_base, vector)]
+            self.velocidad_ejes = [0.0, 0.0, 0.0]
+            self.muestra_mov_anterior = (ahora, [0.0, 0.0, 0.0])
+            self.lbl_velocidad.configure(text="Rapidez: 0.00 m/s")
+            return
+        for i in range(3):
+            v0 = self.velocidad_ejes[i]
+            v1 = v0 + (anterior_a[i] + aceleracion[i]) * 0.5 * dt
+            self.distancia_ejes[i] += (v0 + v1) * 0.5 * dt
+            self.velocidad_ejes[i] = v1
+        self.muestra_mov_anterior = (ahora, aceleracion)
+        for eje, distancia in zip(("X", "Y", "Z"), self.distancia_ejes):
+            self.lbl_dist[eje].configure(text=f"{distancia:+.2f} m")
+        rapidez = math.sqrt(sum(v * v for v in self.velocidad_ejes))
+        self.lbl_velocidad.configure(text=f"Rapidez: {rapidez:.2f} m/s")
+
     # ------------------------------------------------------ datos
-    def estado_sensor(self, nombre, on):
-        b, etq = self.btn_sensor[nombre]
-        if on:
-            b.configure(text=f"{etq}: ON", bg=VERDE_BG, fg=VERDE, activebackground=VERDE_BG,
-                        activeforeground=VERDE)
-        else:
-            b.configure(text=f"{etq}: OFF", bg=BTN, fg=GRIS, activebackground=BTN_HOVER,
-                        activeforeground=GRIS)
+    def alternar_vista_sensor(self, nombre):
+        visible = self.mostrar_componentes[nombre].get()
+        for marco in self.marcos_sensor[nombre]:
+            if visible:
+                marco.grid()
+            else:
+                marco.grid_remove()
+
+    def set_todos_visibles(self, visible):
+        for nombre, variable in self.mostrar_componentes.items():
+            variable.set(visible)
+            self.alternar_vista_sensor(nombre)
 
     def procesar_paquete(self, linea):
         self.ultimo_rx = time.time()
@@ -363,12 +538,21 @@ class App:
             self.poner(self.lbl_abs, f"{float(m.group(1)):,.2f} m")
             mr = RE_REL.search(linea)
             rel = mr.group(1) if mr else None
-            self.poner(self.lbl_rel, f"{float(rel):+.2f}" if rel else "---", CIAN)
+            if rel:
+                self.poner(self.lbl_rel, f"{float(rel):+.2f}", CIAN)
+            else:
+                self.poner(self.lbl_rel, "---", CIAN)
             mt, mp = RE_TEMP.search(linea), RE_PRES.search(linea)
             if mt:
-                self.poner(self.lbl_temp, f"{float(mt.group(1)):.1f}")
+                temp = float(mt.group(1))
+                self.poner(self.lbl_temp, f"{temp:.1f}")
+                self.registrar_muestra(self.historial_temp, temp)
+                self.dibujar_grafico_simple(self.canvas_temp, "°C", "#ffb454")
             if mp:
                 self.poner(self.lbl_pres, f"{float(mp.group(1)):.2f}")
+            mrel = RE_REL.search(linea)
+            if mrel and mrel.group(1) is not None:
+                self.registrar_altura(float(mrel.group(1)))
         else:
             t = estado_texto("BMP")
             self.poner(self.lbl_abs, t)
@@ -379,33 +563,151 @@ class App:
         # DHT11
         m = RE_HUM.search(linea)
         if m:
-            self.poner(self.lbl_hum, f"{float(m.group(1)):.1f}")
+            humedad = float(m.group(1))
+            self.poner(self.lbl_hum, f"{humedad:.1f}")
+            self.registrar_muestra(self.historial_hum, humedad)
+            self.dibujar_grafico_simple(self.canvas_hum, "%", "#4cc9f0")
         else:
             self.poner(self.lbl_hum, estado_texto("DHT"))
 
         # GY-521
         m = RE_ACC.search(linea)
         if m:
-            for lbl, v in zip(self.lbl_acc, m.groups()):
+            valores = [float(v) for v in m.groups()]
+            for lbl, v in zip(self.lbl_acc, valores):
                 self.poner(lbl, f"{float(v):+.3f}")
+            ahora = time.time()
+            self.historial_acc.append((ahora, *valores))
+            self.historial_acc = [p for p in self.historial_acc if ahora - p[0] <= 10.0]
+            total = math.sqrt(sum(v * v for v in valores))
+            self.lbl_acc_total.configure(text=f"{total:.3f} g | {total * 9.80665:.2f} m/s²")
+            self.dibujar_grafico()
+            self.integrar_recorrido(ahora, valores)
         else:
             for lbl in self.lbl_acc:
                 self.poner(lbl, estado_texto("GY"))
+            self.lbl_acc_total.configure(
+                text="ERR" if estados.get("GY") == "ERROR" else "OFF"
+            )
 
         # Servo, estados y señal
         m = RE_SERVO.search(linea)
         if m:
-            self.lbl_servo.configure(text=f"Posición actual: {m.group(1)}°")
-        m = RE_ESTADO.search(linea)
-        if m:
-            for nombre, v in zip(("DHT", "BMP", "GY"), m.groups()):
-                self.estado_sensor(nombre, v == "ON")
+            self.lbl_servo.configure(text=f"Último valor recibido: S{m.group(1)}")
         mr, ms = RE_RSSI.search(linea), RE_SNR.search(linea)
         if mr:
             self.lbl_rssi.configure(text=f"RSSI {float(mr.group(1)):.0f} dBm")
         if ms:
             self.lbl_snr.configure(text=f"SNR {float(ms.group(1)):.1f} dB")
         self.log(f"Pkt #{n}  RSSI {mr.group(1) if mr else '--'} dBm")
+
+    def registrar_altura(self, altura_relativa):
+        if not self.cda_activo:
+            return
+        ahora = time.time()
+        self.muestras_altura.append((ahora, altura_relativa))
+        self.muestras_altura = [m for m in self.muestras_altura if ahora - m[0] <= 20]
+        if len(self.muestras_altura) < 2:
+            self.lbl_impacto.configure(text="Calculando…", fg=GRIS)
+            return
+
+        t0, h0 = self.muestras_altura[0]
+        t1, h1 = self.muestras_altura[-1]
+        dt = t1 - t0
+        if dt <= 0:
+            return
+        velocidad_vertical = (h1 - h0) / dt
+        if h1 <= 0:
+            self.lbl_impacto.configure(text="Suelo alcanzado", fg=ROJO)
+        elif velocidad_vertical < -0.1:
+            segundos = h1 / -velocidad_vertical
+            self.lbl_impacto.configure(text=f"~{segundos:.1f} s", fg=ROJO)
+        else:
+            self.lbl_impacto.configure(text="Sin descenso", fg=VERDE)
+
+    def dibujar_grafico(self):
+        if not hasattr(self, "canvas_acc"):
+            return
+        c = self.canvas_acc
+        c.delete("all")
+        w = max(c.winfo_width(), 200)
+        h = max(c.winfo_height(), 100)
+        izq, der, arriba, abajo = 48, w - 8, 10, h - 22
+        c.create_line(izq, arriba, izq, abajo, fill=BORDE)
+        c.create_line(izq, abajo, der, abajo, fill=BORDE)
+        c.create_text(4, arriba, text="g", fill=GRIS, anchor="nw")
+        c.create_text(izq, h - 3, text="−1 s", fill=GRIS, anchor="sw")
+        c.create_text(der, h - 3, text="ahora", fill=GRIS, anchor="se")
+        for tick in (2, 1, 0, -1, -2):
+            ytick = arriba + (2 - tick) / 4 * (abajo - arriba)
+            c.create_text(izq - 4, ytick, text=f"{tick:+d}" if tick else "0",
+                          fill=GRIS, anchor="e")
+            if tick:
+                c.create_line(izq, ytick, der, ytick, fill="#35404d", dash=(2, 3))
+            else:
+                c.create_line(izq, ytick, der, ytick, fill="#526170")
+        ahora = time.time()
+        muestras = [m for m in self.historial_acc if ahora - m[0] <= 1.0]
+        if not muestras:
+            c.create_text((izq + der) / 2, (arriba + abajo) / 2,
+                          text="Esperando acelerómetro…", fill=GRIS)
+            return
+        colores = {"X": "#4c9aff", "Y": "#ff5c5c", "Z": "#48d17a"}
+        for idx, eje in enumerate(("X", "Y", "Z"), start=1):
+            if not self.mostrar_ejes[eje].get():
+                continue
+            puntos = []
+            for muestra in muestras:
+                x = der - min(1.0, max(0.0, ahora - muestra[0])) * (der - izq)
+                val = max(-2.0, min(2.0, muestra[idx]))
+                y = arriba + (2.0 - val) / 4.0 * (abajo - arriba)
+                puntos.extend((x, y))
+            if len(puntos) >= 4:
+                c.create_line(*puntos, fill=colores[eje], width=2, smooth=True)
+            for j in range(0, len(puntos), 2):
+                x, y = puntos[j], puntos[j + 1]
+                c.create_oval(x - 2, y - 2, x + 2, y + 2,
+                              fill=colores[eje], outline=colores[eje])
+
+    def registrar_muestra(self, historial, valor):
+        ahora = time.time()
+        historial.append((ahora, valor))
+        historial[:] = [m for m in historial if ahora - m[0] <= 10.0]
+
+    def dibujar_grafico_simple(self, canvas, unidad, color):
+        historial = self.historial_temp if unidad == "°C" else self.historial_hum
+        canvas.delete("all")
+        w = max(canvas.winfo_width(), 180)
+        h = max(canvas.winfo_height(), 100)
+        izq, der, arriba, abajo = 34, w - 8, 8, h - 22
+        canvas.create_line(izq, arriba, izq, abajo, fill=BORDE)
+        canvas.create_line(izq, abajo, der, abajo, fill=BORDE)
+        canvas.create_text(3, arriba, text=unidad, fill=GRIS, anchor="nw")
+        canvas.create_text(izq, h - 3, text="−1 s", fill=GRIS, anchor="sw")
+        canvas.create_text(der, h - 3, text="ahora", fill=GRIS, anchor="se")
+        minimo, maximo = (0.0, 50.0) if unidad == "°C" else (0.0, 100.0)
+        marcas = (0, 10, 20, 30, 40, 50) if unidad == "°C" else (0, 25, 50, 75, 100)
+        for marca in marcas:
+            ymarca = abajo - (marca - minimo) / (maximo - minimo) * (abajo - arriba)
+            canvas.create_text(izq - 4, ymarca, text=str(marca), fill=GRIS, anchor="e")
+            canvas.create_line(izq, ymarca, der, ymarca, fill="#35404d", dash=(2, 3))
+        ahora = time.time()
+        muestras = [m for m in historial if ahora - m[0] <= 1.0]
+        if not muestras:
+            canvas.create_text((izq + der) / 2, (arriba + abajo) / 2,
+                               text="Esperando datos…", fill=GRIS)
+            return
+        puntos = []
+        for t, valor in muestras:
+            x = der - min(1.0, max(0.0, ahora - t)) * (der - izq)
+            valor = max(minimo, min(maximo, valor))
+            y = abajo - (valor - minimo) / (maximo - minimo) * (abajo - arriba)
+            puntos.extend((x, y))
+        if len(puntos) >= 4:
+            canvas.create_line(*puntos, fill=color, width=2, smooth=True)
+        for j in range(0, len(puntos), 2):
+            x, y = puntos[j], puntos[j + 1]
+            canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill=color, outline=color)
 
     def procesar(self, linea):
         if RE_PKT.match(linea):
@@ -450,6 +752,11 @@ class App:
             self.badge.configure(text="Comunicación: True", bg=VERDE_BG, fg=VERDE)
         else:
             self.badge.configure(text="Comunicación: False", bg=ROJO_BG, fg=ROJO)
+
+        if hasattr(self, "canvas_acc"):
+            self.dibujar_grafico()
+            self.dibujar_grafico_simple(self.canvas_temp, "°C", "#ffb454")
+            self.dibujar_grafico_simple(self.canvas_hum, "%", "#4cc9f0")
 
         self.root.after(100, self.tick)
 

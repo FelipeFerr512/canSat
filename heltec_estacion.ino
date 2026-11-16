@@ -303,7 +303,16 @@ void setup() {
   delay(100);
   display.begin();
 
-  int estado = radio.begin(915.0, 125.0, 7, 5, 0x12, 10, 8, 1.8);
+  ConfigLoRa_t config;
+  config.frequency = 915000000UL;
+  config.bandwidth = 125000UL;
+  config.spreadingFactor = 7;
+  config.codingRate = 5;
+  config.syncWord = 0x12;
+  config.power = 10;
+  config.preambleLength = 8;
+
+  int estado = radio.begin(config);
   if (estado != RADIOLIB_ERR_NONE) {
     Serial.printf("Error LoRa: %d\n", estado);
     display.clearBuffer();
@@ -314,7 +323,7 @@ void setup() {
   }
   radio.setDio2AsRfSwitch(true);
   radio.setCRC(true);
-  radio.setPacketReceivedAction(setFlag);
+  radio.setDio1Action(setFlag);
   radio.startReceive();
 
   Serial.println("Receptor listo. Comandos: Sx (0-180) | DHT | BMP | GY | TALLON | TALLOFF | FLOOR");

@@ -3,7 +3,9 @@
 //  Procesador: ATmega328P (3.3V, 8 MHz)   |   Monitor serie: 9600
 //
 //  Sensores: BMP180 (I2C), GY-521 / MPU6050 (I2C), DHT11 (A0)
-//  Servo SG90: pin D3 (conector "D3 - BUZZER")
+//  Servo SG90 360: señal en A1 (conector A1); DHT11 en A0.
+//  Un servo continuo no fija angulo: servo.write() controla sentido/velocidad.
+//  El punto de parada cercano a 90 suele requerir calibracion.
 //
 //  Paquete que envia (texto):
 //    ID=42;E=101;B=alt,temp,pres;D=hum;G=ax,ay,az;S=90;A=7
@@ -32,10 +34,10 @@
 #define DHT_PIN   A0
 #define DHT_TYPE  DHT11
 
-#define SERVO_PIN 3
+#define SERVO_PIN A1
 #define MPU_ADDR  0x68
 
-#define INTERVALO_TX 2000UL
+#define INTERVALO_TX 300UL
 
 Adafruit_BMP085 bmp;
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -43,6 +45,12 @@ Servo servo;
 
 bool bmpOk = false;
 bool mpuOk = false;
+float humedadCacheada = NAN;
+unsigned long ultimaLecturaDHT = 0;
+float temperaturaCacheada = NAN;
+float presionCacheada = NAN;
+float alturaCacheada = NAN;
+unsigned long ultimaLecturaBMP = 0;
 
 bool dhtOn = true;
 bool bmpOn = true;
@@ -89,10 +97,17 @@ void enviarDatos() {
 
   if (bmpOn) {
     if (bmpOk) {
+      unsigned long ahora = millis();
+      if (isnan(temperaturaCacheada) || ahora - ultimaLecturaBMP >= 1000UL) {
+        temperaturaCacheada = bmp.readTemperature();
+        presionCacheada = bmp.readPressure() / 100.0;
+        alturaCacheada = bmp.readAltitude(SEA_LEVEL_PA);
+        ultimaLecturaBMP = ahora;
+      }
       char a[12], t[10], p[12];
-      dtostrf(bmp.readAltitude(SEA_LEVEL_PA), 1, 2, a);
-      dtostrf(bmp.readTemperature(), 1, 1, t);
-      dtostrf(bmp.readPressure() / 100.0, 1, 2, p);
+      dtostrf(alturaCacheada, 1, 2, a);
+      dtostrf(temperaturaCacheada, 1, 1, t);
+      dtostrf(presionCacheada, 1, 2, p);
       n += snprintf(buf + n, sizeof(buf) - n, ";B=%s,%s,%s", a, t, p);
     } else {
       n += snprintf(buf + n, sizeof(buf) - n, ";B=E");
@@ -100,12 +115,17 @@ void enviarDatos() {
   }
 
   if (dhtOn) {
-    float h = dht.readHumidity();
-    if (isnan(h)) {
+    unsigned long ahora = millis();
+    if (isnan(humedadCacheada) || ahora - ultimaLecturaDHT >= 2000UL) {
+      float lectura = dht.readHumidity();
+      ultimaLecturaDHT = ahora;
+      if (!isnan(lectura)) humedadCacheada = lectura;
+    }
+    if (isnan(humedadCacheada)) {
       n += snprintf(buf + n, sizeof(buf) - n, ";D=E");
     } else {
       char hs[10];
-      dtostrf(h, 1, 1, hs);
+      dtostrf(humedadCacheada, 1, 1, hs);
       n += snprintf(buf + n, sizeof(buf) - n, ";D=%s", hs);
     }
   }
@@ -195,6 +215,7 @@ void setup() {
   servo.write(servoAngulo);
 
   Wire.begin();
+  Wire.setWireTimeout(25000UL, true);
   dht.begin();
 
   bmpOk = bmp.begin();

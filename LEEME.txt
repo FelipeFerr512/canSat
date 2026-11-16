@@ -1,0 +1,47 @@
+PAQUETE DE TELEMETRIA LORA
+
+Contenido
+- radio_node.ino: firmware para ATmega328P + RFM95.
+- heltec_estacion.ino: firmware de estacion Heltec WiFi LoRa 32 V3.
+- interfaz_telemetria.py: interfaz de escritorio existente.
+- simular_protocolo.py: pruebas logicas reproducibles sin hardware.
+
+Carga
+1. Copiar radio_node.ino a un sketch Arduino llamado radio_node y cargarlo
+   al ATmega328P usando el programador, seleccionando la placa/clock correctos.
+   El monitor serie del nodo funciona a 9600 baudios.
+2. Cargar heltec_estacion.ino a la Heltec WiFi LoRa 32 V3. El monitor serie
+   trabaja a 115200 baudios. La interfaz Python abre ese puerto serie.
+3. Iniciar interfaz_telemetria.py con Python y seleccionar el puerto COM de
+   la Heltec. La interfaz requiere pyserial, tkinter y matplotlib si se usa
+   el trazado incluido; revisar las importaciones si la instalacion local difiere.
+
+Comandos remotos desde la interfaz/Heltec
+- S0 a S180: sentido/velocidad del SG90 360 (S90 suele detenerlo; calibrar).
+- FLOOR: fija como cero la ultima altura BMP recibida.
+
+Los controles DHT/BMP/GY y Mostrar todos/Ocultar todos de la interfaz solo
+muestran u ocultan paneles localmente; no envian comandos de radio.
+El nodo transmite cada 300 ms (3,33 paquetes por segundo, por debajo de 5).
+El DHT11 se consulta cada 2 s y se repite su ultima lectura en los paquetes
+intermedios; el BMP se consulta cada 1 s. El acelerometro se lee en cada ciclo.
+El SG90 de rotacion continua no puede fijar un angulo: S0..S180 gobierna
+sentido/velocidad, y el punto de parada cercano a S90 puede requerir calibracion.
+
+Diagnostico del BMP180
+El nodo imprime “Aviso: no se encuentra el BMP180” si bmp.begin() falla y
+manda B=E en la telemetria. En ese caso no es un fallo de formato LoRa:
+verificar SDA=A4, SCL=A5, 3V3 y GND en el nodo y comprobar que el sensor sea
+BMP180 (direccion I2C 0x77). No conectar el BMP a los pines I2C de la Heltec;
+el sensor pertenece al nodo ATmega.
+
+Pruebas realizadas
+Ejecutar: python simular_protocolo.py
+La simulacion comprueba la coincidencia de parametros de radio, lectura de
+paquetes, sensores con error, controles locales, zona muerta del acelerometro,
+formato y confirmacion de comandos. No sustituye compilacion Arduino ni prueba
+de radio/sensores reales. Arduino CLI no esta instalado en el entorno de QA.
+
+Radio: ambos lados configurados para 915 MHz, BW 125 kHz, SF7, CR 4/5,
+sync word 0x12 y CRC. Asegurar que la frecuencia sea la permitida en la zona
+y que cada modulo use antena adecuada antes de transmitir.

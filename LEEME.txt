@@ -7,14 +7,17 @@ Contenido
 - simular_protocolo.py: pruebas logicas reproducibles sin hardware.
 
 Carga
-1. Copiar radio_node.ino a un sketch Arduino llamado radio_node y cargarlo
-   al ATmega328P usando el programador, seleccionando la placa/clock correctos.
+1. Abrir radio_node.ino como sketch Arduino. Si el IDE lo solicita, crear una
+   carpeta radio_node y colocar dentro el archivo con ese mismo nombre. Cargarlo
+   al ATmega328P usando el programador, seleccionando placa y clock correctos.
    El monitor serie del nodo funciona a 9600 baudios.
-2. Cargar heltec_estacion.ino a la Heltec WiFi LoRa 32 V3. El monitor serie
-   trabaja a 115200 baudios. La interfaz Python abre ese puerto serie.
+2. Abrir heltec_estacion.ino como sketch Arduino. Si el IDE lo solicita, crear
+   una carpeta heltec_estacion y colocar dentro el archivo con ese mismo nombre.
+   Cargarlo a la Heltec WiFi LoRa 32 V3. El monitor serie trabaja a 115200
+   baudios. La interfaz Python abre ese puerto serie.
 3. Iniciar interfaz_telemetria.py con Python y seleccionar el puerto COM de
-   la Heltec. La interfaz requiere pyserial, tkinter y matplotlib si se usa
-   el trazado incluido; revisar las importaciones si la instalacion local difiere.
+la Heltec. La interfaz requiere pyserial y tkinter (normalmente incluido con
+Python). Los graficos se dibujan con tkinter; matplotlib no es necesario.
 
 Comandos remotos desde la interfaz/Heltec
 - S0 a S180: sentido/velocidad del SG90 360 (S90 suele detenerlo; calibrar).
@@ -22,7 +25,12 @@ Comandos remotos desde la interfaz/Heltec
 
 Los controles DHT/BMP/GY y Mostrar todos/Ocultar todos de la interfaz solo
 muestran u ocultan paneles localmente; no envian comandos de radio.
-El nodo transmite cada 300 ms (3,33 paquetes por segundo, por debajo de 5).
+El nodo intenta transmitir cada 200 ms (hasta 5 paquetes por segundo).
+Para evitar colisiones, la Heltec solo transmite comandos despues de cada quinto
+paquete de telemetria (ventana de subida, aproximadamente una vez por segundo).
+La confirmacion vuelve incluida en el siguiente paquete normal; no se envia una
+respuesta LoRa adicional. Esto conserva la cadencia de telemetria y limita los
+comandos a una frecuencia adecuada para controles y cambios de sensores.
 El DHT11 se consulta cada 2 s y se repite su ultima lectura en los paquetes
 intermedios; el BMP se consulta cada 1 s. El acelerometro se lee en cada ciclo.
 El SG90 de rotacion continua no puede fijar un angulo: S0..S180 gobierna
@@ -36,7 +44,7 @@ BMP180 (direccion I2C 0x77). No conectar el BMP a los pines I2C de la Heltec;
 el sensor pertenece al nodo ATmega.
 
 Pruebas realizadas
-Ejecutar: python simular_protocolo.py
+Desde esta carpeta, ejecutar: python simular_protocolo.py
 La simulacion comprueba la coincidencia de parametros de radio, lectura de
 paquetes, sensores con error, controles locales, zona muerta del acelerometro,
 formato y confirmacion de comandos. No sustituye compilacion Arduino ni prueba

@@ -4,8 +4,8 @@ import math
 import re
 
 ROOT = Path(__file__).resolve().parent
-NODE = (ROOT / "radio_node" / "radio_node.ino").read_text(encoding="utf-8")
-STATION = (ROOT / "heltec_estacion" / "heltec_estacion.ino").read_text(encoding="utf-8")
+NODE = (ROOT / "radio_node.ino").read_text(encoding="utf-8")
+STATION = (ROOT / "heltec_estacion.ino").read_text(encoding="utf-8")
 GUI = (ROOT / "interfaz_telemetria.py").read_text(encoding="utf-8")
 
 
@@ -40,7 +40,7 @@ def main():
     # Placa, cableado declarado, cadencia y proteccion de lecturas I2C.
     assert "#define SERVO_PIN A1" in NODE
     assert "#define MPU_ADDR  0x68" in NODE
-    assert "#define INTERVALO_TX 300UL" in NODE
+    assert "#define INTERVALO_TX 200UL" in NODE
     assert "Wire.setWireTimeout(25000UL, true)" in NODE
     assert "ahora - ultimaLecturaDHT >= 2000UL" in NODE
     assert "ahora - ultimaLecturaBMP >= 1000UL" in NODE

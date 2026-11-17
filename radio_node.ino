@@ -37,7 +37,7 @@
 #define SERVO_PIN A1
 #define MPU_ADDR  0x68
 
-#define INTERVALO_TX 300UL
+#define INTERVALO_TX 200UL
 
 Adafruit_BMP085 bmp;
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -60,7 +60,7 @@ int servoAngulo = 0;
 uint8_t ultimaSeq = 0;
 uint16_t contador = 0;
 unsigned long ultimoTx = 0;
-bool enviarYa = false;
+unsigned long finVentanaSubida = 0;
 
 // ---------- GY-521 (MPU6050) por I2C, sin libreria ----------
 bool mpuInit() {
@@ -204,7 +204,8 @@ void revisarComandos() {
   } else {
     Serial.println(F("Comando repetido, se ignora"));
   }
-  enviarYa = true;   // responde enseguida con la confirmacion
+  // La confirmacion viaja en el siguiente paquete normal; no transmitir
+  // inmediatamente evita que la respuesta choque con la telemetria.
 }
 
 // ---------- Setup / loop ----------
@@ -243,9 +244,11 @@ void setup() {
 void loop() {
   revisarComandos();
 
-  if (enviarYa || millis() - ultimoTx >= INTERVALO_TX) {
-    enviarYa = false;
+  if (millis() - ultimoTx >= INTERVALO_TX &&
+      (long)(millis() - finVentanaSubida) >= 0) {
     ultimoTx = millis();
     enviarDatos();
+    // Cada quinto paquete deja 80 ms libres para un comando desde la Heltec.
+    if (contador % 5 == 0) finVentanaSubida = millis() + 80UL;
   }
 }

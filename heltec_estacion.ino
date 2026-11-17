@@ -7,8 +7,9 @@
 //  Comandos por serie (monitor o interfaz Python):
 //    Sx (x = 0..180) | DHT | BMP | GY | TALLON | TALLOFF  -> se envian por LoRa
 //    FLOOR -> define el piso (altura relativa = 0), se resuelve en la Heltec
-//  Los comandos se envian con numero de secuencia y se reintentan hasta
-//  que el nodo los confirma (o 4 intentos).
+//  La telemetria abre una ventana de subida despues de cada quinto paquete.
+//  Los comandos se envian alli, con secuencia y reintentos; la confirmacion
+//  vuelve en el siguiente paquete normal del nodo.
 // ============================================================
 #include <RadioLib.h>
 #include <U8g2lib.h>
@@ -25,7 +26,7 @@
 
 #define TIMEOUT_COMUNICACION 6000UL
 #define TIEMPO_MOSTRAR_CMD   1000UL
-#define REINTENTO_MS         2600UL
+#define REINTENTO_MS         850UL
 #define MAX_INTENTOS         4
 #define TAM_COLA             8
 
@@ -119,7 +120,6 @@ void iniciarEnvio(const String &cmd) {
   pend.activo = true;
   comandoMostrado = cmd;
   inicioComando = millis();
-  transmitirPendiente();
 }
 
 void encolar(const String &cmd) {
@@ -139,7 +139,8 @@ void siguienteComando() {
   iniciarEnvio(c);
 }
 
-void revisarReintentos() {
+void revisarReintentos(bool ventanaSubida) {
+  if (!ventanaSubida) return;
   if (!pend.activo || millis() - pend.ultimo < REINTENTO_MS) return;
   if (pend.intentos >= MAX_INTENTOS) {
     Serial.printf(">> Comando '%s' SIN CONFIRMAR\n", pend.cmd.c_str());
@@ -147,6 +148,15 @@ void revisarReintentos() {
     return;
   }
   transmitirPendiente();
+}
+
+void atenderVentanaSubida() {
+  if (pend.activo) {
+    revisarReintentos(true);
+  } else if (colaCnt > 0) {
+    siguienteComando();
+    transmitirPendiente();
+  }
 }
 
 // ---------- Comandos por serie ----------
@@ -227,6 +237,10 @@ void procesarPaquete() {
       radio.startReceive();
       return;
     }
+
+    // Cada quinto paquete abre una ventana de subida, justo despues de RX.
+    // El nodo sigue enviando telemetria a 5 Hz y confirma comandos por A=seq.
+    if ((id.toInt() % 5) == 4) atenderVentanaSubida();
 
     hayDato  = true;
     ultimoRx = millis();
@@ -338,7 +352,5 @@ void loop() {
     procesarPaquete();
   }
 
-  revisarReintentos();
-  siguienteComando();
   actualizarDisplay();
 }

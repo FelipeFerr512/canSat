@@ -3,9 +3,7 @@
 //  Procesador: ATmega328P (3.3V, 8 MHz)   |   Monitor serie: 9600
 //
 //  Sensores: BMP180 (I2C), GY-521 / MPU6050 (I2C), DHT11 (A0)
-//  Servo SG90 360: señal en A1 (conector A1); DHT11 en A0.
-//  Un servo continuo no fija angulo: servo.write() controla sentido/velocidad.
-//  El punto de parada cercano a 90 suele requerir calibracion.
+//  Servo SG90 posicional: señal en A1; switch a D5 y GND; buzzer a D3.
 //
 //  Paquete que envia (texto):
 //    ID=42;E=101;B=alt,temp,pres;D=hum;G=ax,ay,az;S=90;A=7
@@ -15,7 +13,8 @@
 //    A = ultimo comando recibido (confirmacion para la Heltec)
 //
 //  Comandos que recibe:  #<seq>:<cmd>
-//    SX (X = 0..180) | DHT | BMP | GY | TALLON | TALLOFF
+//    SX (X = 0..180 grados)
+//    DHT | BMP | GY | TALLON | TALLOFF | BZ
 // ============================================================
 #include <SPI.h>
 #include <Wire.h>
@@ -35,6 +34,9 @@
 #define DHT_TYPE  DHT11
 
 #define SERVO_PIN A1
+#define BUZZER_PIN 3
+#define SWITCH_PIN 5
+#define CAM_TRIGGER_PIN 4
 #define MPU_ADDR  0x68
 
 #define INTERVALO_TX 200UL
@@ -42,6 +44,7 @@
 Adafruit_BMP085 bmp;
 DHT dht(DHT_PIN, DHT_TYPE);
 Servo servo;
+bool servoAdjunto = false;
 
 bool bmpOk = false;
 bool mpuOk = false;
@@ -55,8 +58,20 @@ unsigned long ultimaLecturaBMP = 0;
 bool dhtOn = true;
 bool bmpOn = true;
 bool gyOn  = true;
+bool buzzerOn = false;
+bool servoAutomaticoArmado = false;
+bool desarmeBloqueado = false;
 
-int servoAngulo = 0;
+int servoAngulo = 90;
+bool switchTemporizando = false;
+bool switchYaAcciono = false;
+bool eventoCamara = false;
+bool camaraTriggerActivo = false;
+unsigned long camaraTriggerHasta = 0;
+bool switchCerradoVisto = false;
+bool switchLecturaRaw = HIGH;
+unsigned long switchAbiertoDesde = 0;
+unsigned long switchCambioDesde = 0;
 uint8_t ultimaSeq = 0;
 uint16_t contador = 0;
 unsigned long ultimoTx = 0;
@@ -92,7 +107,7 @@ bool mpuLeer(float &ax, float &ay, float &az) {
 
 // ---------- Envio de telemetria ----------
 void enviarDatos() {
-  char buf[120];
+  char buf[160];
   int n = snprintf(buf, sizeof(buf), "ID=%u;E=%d%d%d", contador++, dhtOn, bmpOn, gyOn);
 
   if (bmpOn) {
@@ -143,7 +158,7 @@ void enviarDatos() {
     }
   }
 
-  snprintf(buf + n, sizeof(buf) - n, ";S=%d;A=%u", servoAngulo, ultimaSeq);
+  snprintf(buf + n, sizeof(buf) - n, ";S=%d;A=%u;C=%u", servoAngulo, ultimaSeq, eventoCamara ? 1 : 0);
 
   LoRa.beginPacket();
   LoRa.print(buf);
@@ -155,6 +170,14 @@ void enviarDatos() {
 }
 
 // ---------- Comandos ----------
+void moverServo(int angulo) {
+  if (!servoAdjunto) {
+    servo.attach(SERVO_PIN);
+    servoAdjunto = true;
+  }
+  servo.write(angulo);
+}
+
 void ejecutarComando(const char *cmd) {
   Serial.print(F("Comando: "));
   Serial.println(cmd);
@@ -169,12 +192,41 @@ void ejecutarComando(const char *cmd) {
     dhtOn = bmpOn = gyOn = true;
   } else if (strcmp(cmd, "TALLOFF") == 0) {
     dhtOn = bmpOn = gyOn = false;
+  } else if (strcmp(cmd, "BZ") == 0) {
+    buzzerOn = !buzzerOn;
+    digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
+  } else if (strcmp(cmd, "ARM") == 0) {
+    if (desarmeBloqueado) {
+      Serial.println(F("ARM rechazado: DESARME enclavado; use REARME"));
+    } else {
+      servoAutomaticoArmado = true;
+      switchTemporizando = false;
+      switchYaAcciono = false;
+      switchCerradoVisto = false;
+      switchLecturaRaw = digitalRead(SWITCH_PIN);
+      switchCambioDesde = millis();
+      Serial.println(F("Servo automatico armado"));
+    }
+  } else if (strcmp(cmd, "DESARME") == 0) {
+    servoAutomaticoArmado = false;
+    desarmeBloqueado = true;
+    switchTemporizando = false;
+    switchYaAcciono = false;
+    switchCerradoVisto = false;
+    Serial.println(F("Servo automatico desarmado; comandos manuales habilitados"));
+  } else if (strcmp(cmd, "REARME") == 0) {
+    desarmeBloqueado = false;
+    servoAutomaticoArmado = false;
+    switchTemporizando = false;
+    switchYaAcciono = false;
+    switchCerradoVisto = false;
+    Serial.println(F("Bloqueo liberado; pulse CDA para armar el servo"));
   } else if (cmd[0] == 'S') {
     int a = atoi(cmd + 1);
     if (a < 0) a = 0;
     if (a > 180) a = 180;
     servoAngulo = a;
-    servo.write(a);
+    moverServo(a);
   }
 }
 
@@ -208,12 +260,54 @@ void revisarComandos() {
   // inmediatamente evita que la respuesta choque con la telemetria.
 }
 
+void revisarSwitchServo() {
+  bool lectura = digitalRead(SWITCH_PIN);
+  if (lectura != switchLecturaRaw) {
+    switchLecturaRaw = lectura;
+    switchCambioDesde = millis();
+    switchTemporizando = false;
+    return;
+  }
+  if (millis() - switchCambioDesde < 40UL) return;
+  bool switchAbierto = switchLecturaRaw == HIGH;
+  if (!switchAbierto) {
+    switchCerradoVisto = true;
+    switchTemporizando = false;
+    return;
+  }
+  // Exige ver primero el switch cerrado tras CDA. Un D5 desconectado queda
+  // en HIGH por INPUT_PULLUP y no puede disparar el servo por error.
+  if (!switchCerradoVisto) return;
+  if (switchYaAcciono) return;
+  if (!switchTemporizando) {
+    switchTemporizando = true;
+    switchAbiertoDesde = millis();
+    return;
+  }
+  if (millis() - switchAbiertoDesde >= 2000UL) {
+    switchYaAcciono = true;
+    eventoCamara = true;
+    digitalWrite(CAM_TRIGGER_PIN, HIGH);
+    camaraTriggerActivo = true;
+    camaraTriggerHasta = millis() + 500UL;
+    if (servoAutomaticoArmado && !desarmeBloqueado) {
+      servoAngulo = 180;
+      moverServo(servoAngulo);
+      Serial.println(F("Switch abierto 2 s: servo a 180 grados"));
+    }
+    Serial.println(F("Evento switch: grabacion y CDA iniciados"));
+  }
+}
+
 // ---------- Setup / loop ----------
 void setup() {
   Serial.begin(9600);
 
-  servo.attach(SERVO_PIN);
-  servo.write(servoAngulo);
+  pinMode(SWITCH_PIN, INPUT_PULLUP);
+  pinMode(CAM_TRIGGER_PIN, OUTPUT);
+  digitalWrite(CAM_TRIGGER_PIN, LOW);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   Wire.begin();
   Wire.setWireTimeout(25000UL, true);
@@ -242,13 +336,19 @@ void setup() {
 }
 
 void loop() {
+  if (camaraTriggerActivo && (long)(millis() - camaraTriggerHasta) >= 0) {
+    digitalWrite(CAM_TRIGGER_PIN, LOW);
+    camaraTriggerActivo = false;
+  }
   revisarComandos();
+  revisarSwitchServo();
 
   if (millis() - ultimoTx >= INTERVALO_TX &&
       (long)(millis() - finVentanaSubida) >= 0) {
     ultimoTx = millis();
     enviarDatos();
-    // Cada quinto paquete deja 80 ms libres para un comando desde la Heltec.
-    if (contador % 5 == 0) finVentanaSubida = millis() + 80UL;
+    // Cada quinto paquete deja 400 ms para recibir comandos de la Heltec.
+    if (contador % 5 == 0) finVentanaSubida = millis() + 400UL;
   }
 }
+

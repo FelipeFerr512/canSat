@@ -5,7 +5,8 @@
 //  Monitor serie: 115200
 //
 //  Comandos por serie (monitor o interfaz Python):
-//    Sx (x = 0..180) | DHT | BMP | GY | TALLON | TALLOFF  -> se envian por LoRa
+//    Sx (x = 0..180 grados) | DHT | BMP | GY
+//    TALLON | TALLOFF | BZ -> se envian por LoRa
 //    FLOOR -> define el piso (altura relativa = 0), se resuelve en la Heltec
 //  La telemetria abre una ventana de subida despues de cada quinto paquete.
 //  Los comandos se envian alli, con secuencia y reintentos; la confirmacion
@@ -24,10 +25,11 @@
 #define OLED_RST 21
 #define VEXT_PIN 36
 
-#define TIMEOUT_COMUNICACION 6000UL
+#define TIMEOUT_COMUNICACION 1500UL
 #define TIEMPO_MOSTRAR_CMD   1000UL
 #define REINTENTO_MS         850UL
-#define MAX_INTENTOS         4
+#define MAX_INTENTOS         8
+#define COPIAS_POR_VENTANA   3
 #define TAM_COLA             8
 
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
@@ -100,16 +102,23 @@ void actualizarDisplay() {
 // ---------- Envio de comandos (cola + confirmacion + reintentos) ----------
 void transmitirPendiente() {
   String payload = "#" + String(pend.seq) + ":" + pend.cmd;
-  int estado = radio.transmit(payload);
+  uint8_t copiasOk = 0;
+  for (uint8_t i = 0; i < COPIAS_POR_VENTANA; i++) {
+    int estado = radio.transmit(payload);
+    if (estado == RADIOLIB_ERR_NONE) {
+      copiasOk++;
+    } else {
+      Serial.printf(">> Error al enviar copia %u de '%s': %d\n",
+                    i + 1, pend.cmd.c_str(), estado);
+    }
+    paqueteRecibido = false;
+    radio.startReceive();
+    if (i + 1 < COPIAS_POR_VENTANA) delay(40);
+  }
   pend.ultimo = millis();
   pend.intentos++;
-  if (estado == RADIOLIB_ERR_NONE) {
-    Serial.printf(">> Comando '%s' enviado (intento %d)\n", pend.cmd.c_str(), pend.intentos);
-  } else {
-    Serial.printf(">> Error al enviar comando '%s': %d\n", pend.cmd.c_str(), estado);
-  }
-  paqueteRecibido = false;
-  radio.startReceive();
+  Serial.printf(">> Comando '%s' enviado: %u/%u copias (ventana %u)\n",
+                pend.cmd.c_str(), copiasOk, COPIAS_POR_VENTANA, pend.intentos);
 }
 
 void iniciarEnvio(const String &cmd) {
@@ -161,7 +170,8 @@ void atenderVentanaSubida() {
 
 // ---------- Comandos por serie ----------
 bool comandoValido(const String &c) {
-  if (c == "DHT" || c == "BMP" || c == "GY" || c == "TALLON" || c == "TALLOFF") return true;
+  if (c == "DHT" || c == "BMP" || c == "GY" || c == "TALLON" || c == "TALLOFF" ||
+      c == "BZ" || c == "ARM" || c == "DESARME" || c == "REARME") return true;
   if (c.length() >= 2 && c.length() <= 4 && c[0] == 'S') {
     for (unsigned int i = 1; i < c.length(); i++) {
       if (!isDigit(c[i])) return false;
@@ -232,6 +242,7 @@ void procesarPaquete() {
     datos = ";" + datos;
     String id = campo(datos, "ID");
     String e  = campo(datos, "E");
+    String cam = campo(datos, "C");
 
     if (id.length() == 0 || e.length() < 3) {
       radio.startReceive();
@@ -250,6 +261,7 @@ void procesarPaquete() {
     bool gOn = e[2] == '1';
 
     Serial.printf("Pkt #%s", id.c_str());
+    if (cam == "1") Serial.print(" | CAMARA: INICIADA");
 
     String b = campo(datos, "B");
     if (!bOn) {
@@ -310,6 +322,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setTimeout(50);
 
+
   seqCmd = (esp_random() % 200) + 1;
 
   pinMode(VEXT_PIN, OUTPUT);
@@ -340,7 +353,7 @@ void setup() {
   radio.setDio1Action(setFlag);
   radio.startReceive();
 
-  Serial.println("Receptor listo. Comandos: Sx (0-180) | DHT | BMP | GY | TALLON | TALLOFF | FLOOR");
+  Serial.println("Receptor listo. Comandos: Sx (0-180) | DHT | BMP | GY | TALLON | TALLOFF | BZ | ARM | DESARME | REARME | FLOOR");
   actualizarDisplay();
 }
 

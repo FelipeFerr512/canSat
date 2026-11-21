@@ -20,8 +20,9 @@ import serial
 from serial.tools import list_ports
 
 BAUDIOS = 115200
-PUERTO_POR_DEFECTO = "COM7"
-TIMEOUT_COMUNICACION = 6.0
+PUERTO_POR_DEFECTO = "COM3"
+# Tolera la ventana LoRa de 400 ms, el tiempo en aire y algun paquete perdido.
+TIMEOUT_COMUNICACION = 1.5
 
 BG = "#0f1419"
 PANEL = "#171d25"
@@ -57,8 +58,8 @@ class App:
         self.root = root
         root.title("Estación terrena LoRa")
         root.configure(bg=BG)
-        root.geometry("1100x800")
-        root.minsize(1000, 760)
+        root.state("zoomed")
+        root.minsize(900, 600)
 
         self.ser = None
         self.stop = threading.Event()
@@ -68,12 +69,13 @@ class App:
         self.historial_temp = []
         self.historial_hum = []
         self.muestras_altura = []
+        self.muestras_velocidad_altura = []
+        self.ultima_altura_velocidad = None
+        self.velocidad_caida_filtrada = None
+        self.altura_inicio_descenso = None
+        self.altura_maxima_desde_cda = None
+        self.ultima_altura_absoluta = None
         self.cda_activo = False
-        self.gravedad_base = None
-        self.muestras_calibracion = []
-        self.muestra_mov_anterior = None
-        self.velocidad_ejes = [0.0, 0.0, 0.0]
-        self.distancia_ejes = [0.0, 0.0, 0.0]
         self.mostrar_componentes = {"BMP": tk.BooleanVar(value=True),
                                     "DHT": tk.BooleanVar(value=True),
                                     "GY": tk.BooleanVar(value=True)}
@@ -130,11 +132,14 @@ class App:
         r = self.root
         for col in range(3):
             r.columnconfigure(col, weight=1, uniform="inferior")
-        r.rowconfigure(3, weight=1)
+        r.rowconfigure(1, weight=0)
+        r.rowconfigure(2, weight=0)
+        r.rowconfigure(3, weight=1, minsize=150)
+        r.rowconfigure(4, weight=0, minsize=55)
 
         # ---- Cabecera
         cab = tk.Frame(r, bg=BG)
-        cab.grid(row=0, column=0, columnspan=3, sticky="ew", padx=24, pady=(20, 10))
+        cab.grid(row=0, column=0, columnspan=3, sticky="ew", padx=24, pady=(8, 6))
         cab.columnconfigure(0, weight=1)
 
         izq = tk.Frame(cab, bg=BG)
@@ -154,7 +159,7 @@ class App:
         self.btn_conectar = self.boton(der, "Conectar", self.alternar_conexion)
         self.btn_conectar.configure(padx=12, pady=5)
         self.btn_conectar.pack(side="left", padx=(0, 14))
-        self.badge = tk.Label(der, text="Comunicación: False", bg=ROJO_BG, fg=ROJO,
+        self.badge = tk.Label(der, text="Comunicación: Offline", bg=ROJO_BG, fg=ROJO,
                               font=("Segoe UI", 11, "bold"), padx=16, pady=6)
         self.badge.pack(side="left")
 
@@ -190,24 +195,26 @@ class App:
 
         recorrido = self.panel(medio)
         recorrido.grid(row=0, column=2, sticky="nsew")
-        self.etiqueta(recorrido, "DISTANCIA RECORRIDA · CDA").pack(
+        self.etiqueta(recorrido, "DESCENSO · BMP180").pack(
             anchor="w", padx=14, pady=(12, 6))
-        self.lbl_dist = {}
-        for eje, color in (("X", "#4c9aff"), ("Y", "#ff5c5c"), ("Z", "#48d17a")):
-            fila = tk.Frame(recorrido, bg=PANEL)
-            fila.pack(fill="x", padx=14, pady=2)
-            tk.Label(fila, text=eje, bg=PANEL, fg=color,
-                     font=("Segoe UI", 11, "bold"), width=3, anchor="w").pack(side="left")
-            self.lbl_dist[eje] = tk.Label(fila, text="--- m", bg=PANEL, fg=TEXTO,
-                                          font=("Segoe UI", 12, "bold"))
-            self.lbl_dist[eje].pack(side="left")
-        self.lbl_velocidad = tk.Label(recorrido, text="Rapidez: --- m/s",
-                                      bg=PANEL, fg=CIAN,
-                                      font=("Segoe UI", 13, "bold"))
-        self.lbl_velocidad.pack(anchor="w", padx=14, pady=(8, 0))
         self.btn_cda = self.boton(recorrido, "CDA · iniciar medición",
                                   self.activar_cda, primario=True)
         self.btn_cda.pack(anchor="w", padx=14, pady=(8, 10))
+        self.lbl_velocidad_caida = tk.Label(
+            recorrido, text="Caída vertical: calculando…", bg=PANEL, fg=VERDE,
+            font=("Segoe UI", 12, "bold")
+        )
+        self.lbl_velocidad_caida.pack(anchor="w", padx=14, pady=(0, 12))
+        self.lbl_descenso_vertical = tk.Label(
+            recorrido, text="Descenso vertical: iniciar CDA", bg=PANEL, fg=VERDE,
+            font=("Segoe UI", 11, "bold")
+        )
+        self.lbl_descenso_vertical.pack(anchor="w", padx=14, pady=(0, 10))
+        self.lbl_ascenso_vertical = tk.Label(
+            recorrido, text="Ascenso máximo: iniciar CDA", bg=PANEL, fg=CIAN,
+            font=("Segoe UI", 11, "bold")
+        )
+        self.lbl_ascenso_vertical.pack(anchor="w", padx=14, pady=(0, 10))
 
         p, self.lbl_temp = self.tarjeta_dato(grid, "TEMPERATURA", "°C", "BMP180")
         p.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
@@ -269,15 +276,15 @@ class App:
         # Servo
         pv = self.panel(ctl)
         pv.grid(row=0, column=1, sticky="nsew", padx=(0, 16))
-        self.etiqueta(pv, "SG90 360 · SENTIDO/VELOCIDAD").pack(anchor="w", padx=18, pady=(14, 8))
+        self.etiqueta(pv, "SG90 · POSICIÓN (0–180°)").pack(anchor="w", padx=18, pady=(14, 8))
         fila = tk.Frame(pv, bg=PANEL)
         fila.pack(fill="x", padx=18)
-        for ang, texto in ((0, "S0"), (90, "S90 · detener"), (180, "S180")):
+        for ang, texto in ((0, "S0"), (90, "S90 · centro"), (180, "S180")):
             self.boton(fila, texto, lambda a=ang: self.enviar(f"S{a}")).pack(
                 side="left", expand=True, fill="x", padx=(0, 6))
         fila2 = tk.Frame(pv, bg=PANEL)
         fila2.pack(fill="x", padx=18, pady=(8, 6))
-        self.var_ang = tk.StringVar(value="45")
+        self.var_ang = tk.StringVar(value="90")
         tk.Entry(fila2, textvariable=self.var_ang, width=6, justify="center",
                  bg=BTN, fg=TEXTO, insertbackground=TEXTO, relief="flat",
                  font=("Segoe UI", 12)).pack(side="left", ipady=5, padx=(0, 8))
@@ -291,8 +298,18 @@ class App:
         pp = self.panel(ctl)
         pp.grid(row=0, column=2, sticky="nsew")
         self.etiqueta(pp, "PISO Y SEÑAL").pack(anchor="w", padx=18, pady=(14, 8))
-        self.boton(pp, "FLOOR (definir piso)", lambda: self.enviar("FLOOR")).pack(
-            fill="x", padx=18)
+        acciones = tk.Frame(pp, bg=PANEL)
+        acciones.pack(fill="x", padx=18)
+        acciones.columnconfigure(0, weight=1, uniform="acciones")
+        acciones.columnconfigure(1, weight=1, uniform="acciones")
+        self.boton(acciones, "FLOOR", lambda: self.enviar("FLOOR")).grid(
+            row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 4))
+        self.boton(acciones, "Buzzer · alternar", lambda: self.enviar("BZ")).grid(
+            row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 4))
+        self.boton(acciones, "DESARME", lambda: self.enviar("DESARME")).grid(
+            row=1, column=0, sticky="ew", padx=(0, 4))
+        self.boton(acciones, "REARMAR", lambda: self.enviar("REARME")).grid(
+            row=1, column=1, sticky="ew", padx=(4, 0))
         fila = tk.Frame(pp, bg=PANEL)
         fila.pack(fill="x", padx=18, pady=(8, 0))
         self.lbl_rssi = tk.Label(fila, text="RSSI -- dBm", bg=PANEL, fg=TEXTO,
@@ -324,7 +341,7 @@ class App:
             ).pack(side="left", padx=(0, 8))
 
         self.canvas_acc = tk.Canvas(
-            graf, height=125, bg="#111820", highlightthickness=1,
+            graf, height=88, bg="#111820", highlightthickness=1,
             highlightbackground=BORDE
         )
         self.canvas_acc.pack(fill="both", expand=True, pady=(2, 0))
@@ -345,8 +362,8 @@ class App:
         )
         self.lbl_impacto.pack_forget()
 
-        self.canvas_temp = self.crear_grafico_simple(r, 3, 1, "TEMPERATURA · 1 s", "°C", "#ffb454")
-        self.canvas_hum = self.crear_grafico_simple(r, 3, 2, "HUMEDAD · 1 s", "%", "#4cc9f0")
+        self.canvas_temp = self.crear_grafico_simple(r, 3, 1, "TEMPERATURA · últimos 10 s", "°C", "#ffb454")
+        self.canvas_hum = self.crear_grafico_simple(r, 3, 2, "HUMEDAD · últimos 10 s", "%", "#4cc9f0")
         self.marcos_sensor["BMP"].append(self.canvas_temp.master)
         self.marcos_sensor["DHT"].append(self.canvas_hum.master)
 
@@ -355,14 +372,14 @@ class App:
         reg.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=24, pady=(0, 14))
         self.etiqueta(reg, "REGISTRO").pack(anchor="w", padx=18, pady=(6, 2))
         self.txt = tk.Text(reg, bg=PANEL, fg="#c5d0db", font=("Consolas", 9), relief="flat",
-                           height=3, wrap="none", state="disabled", highlightthickness=0)
+                           height=2, wrap="none", state="disabled", highlightthickness=0)
         self.txt.pack(fill="both", expand=True, padx=18, pady=(0, 6))
 
     def crear_grafico_simple(self, parent, fila, columna, titulo, unidad, color):
         panel = self.panel(parent)
         panel.grid(row=fila, column=columna, sticky="nsew", padx=6, pady=(6, 8))
         self.etiqueta(panel, titulo).pack(anchor="w", padx=12, pady=(9, 3))
-        canvas = tk.Canvas(panel, height=125, bg="#111820", highlightthickness=1,
+        canvas = tk.Canvas(panel, height=88, bg="#111820", highlightthickness=1,
                            highlightbackground=BORDE)
         canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         canvas.bind("<Configure>", lambda _e, c=canvas, k=unidad, col=color:
@@ -450,65 +467,27 @@ class App:
         self.enviar(f"S{a}")
 
     def activar_cda(self):
-        # CDA inicia una nueva estimacion local desde el proximo dato del GY.
+        # CDA fija la altura barometrica inicial para medir descenso vertical.
         self.cda_activo = True
-        self.gravedad_base = None
-        self.muestras_calibracion = []
-        self.muestra_mov_anterior = None
-        self.velocidad_ejes = [0.0, 0.0, 0.0]
-        self.distancia_ejes = [0.0, 0.0, 0.0]
         self.muestras_altura.clear()
-        for eje in ("X", "Y", "Z"):
-            self.lbl_dist[eje].configure(text="0.00 m")
-        self.lbl_velocidad.configure(text="Velocidad: 0.00 m/s")
+        self.altura_inicio_descenso = self.ultima_altura_absoluta
+        self.altura_maxima_desde_cda = self.altura_inicio_descenso
+        self.lbl_descenso_vertical.configure(
+            text=("Descenso vertical: 0.00 m" if self.altura_inicio_descenso is not None
+                  else "Descenso vertical: esperando BMP180")
+        )
+        self.lbl_ascenso_vertical.configure(
+            text=("Ascenso máximo: 0.00 m" if self.altura_maxima_desde_cda is not None
+                  else "Ascenso máximo: esperando BMP180")
+        )
         self.lbl_impacto.configure(text="Esperando descenso…", fg=GRIS)
         self.lbl_impacto.pack(side="left", padx=(6, 0))
         self.btn_cda.configure(text="CDA · reiniciar medición")
-        self.lbl_cmd.configure(text="Último comando: CDA (medición iniciada)")
-
-    def integrar_recorrido(self, ahora, valores_g):
-        if not self.cda_activo:
-            return
-        gravedad = 9.80665
-        vector = [v * gravedad for v in valores_g]
-        if self.gravedad_base is None:
-            # Promedia varias muestras iniciales para estimar el sesgo/gravedad en reposo.
-            self.muestras_calibracion.append(vector)
-            if len(self.muestras_calibracion) < 5:
-                self.lbl_velocidad.configure(text="Calibrando en reposo…")
-                return
-            self.gravedad_base = [
-                sum(m[i] for m in self.muestras_calibracion) / len(self.muestras_calibracion)
-                for i in range(3)
-            ]
-            self.muestra_mov_anterior = (ahora, [0.0, 0.0, 0.0])
-            self.lbl_velocidad.configure(text="Rapidez: 0.00 m/s")
-            return
-        anterior_t, anterior_a = self.muestra_mov_anterior
-        dt = ahora - anterior_t
-        if dt <= 0 or dt > 3:
-            self.muestra_mov_anterior = (ahora, [v - b for v, b in zip(vector, self.gravedad_base)])
-            return
-        aceleracion = [v - b for v, b in zip(vector, self.gravedad_base)]
-        # Zona muerta para ruido del acelerometro: sin movimiento medible, no integrar.
-        if math.sqrt(sum(a * a for a in aceleracion)) < 1.5:  # ~0.15 g: inmovil/ruido
-            # Adaptacion lenta del vector de gravedad mientras esta quieto.
-            self.gravedad_base = [0.98 * b + 0.02 * v
-                                  for b, v in zip(self.gravedad_base, vector)]
-            self.velocidad_ejes = [0.0, 0.0, 0.0]
-            self.muestra_mov_anterior = (ahora, [0.0, 0.0, 0.0])
-            self.lbl_velocidad.configure(text="Rapidez: 0.00 m/s")
-            return
-        for i in range(3):
-            v0 = self.velocidad_ejes[i]
-            v1 = v0 + (anterior_a[i] + aceleracion[i]) * 0.5 * dt
-            self.distancia_ejes[i] += (v0 + v1) * 0.5 * dt
-            self.velocidad_ejes[i] = v1
-        self.muestra_mov_anterior = (ahora, aceleracion)
-        for eje, distancia in zip(("X", "Y", "Z"), self.distancia_ejes):
-            self.lbl_dist[eje].configure(text=f"{distancia:+.2f} m")
-        rapidez = math.sqrt(sum(v * v for v in self.velocidad_ejes))
-        self.lbl_velocidad.configure(text=f"Rapidez: {rapidez:.2f} m/s")
+        if self.ser:
+            self.enviar("ARM")
+            self.lbl_cmd.configure(text="CDA iniciado · armado automático solicitado")
+        else:
+            self.lbl_cmd.configure(text="CDA local · conecta para armar el servo automático")
 
     # ------------------------------------------------------ datos
     def alternar_vista_sensor(self, nombre):
@@ -535,7 +514,26 @@ class App:
         # BMP180
         m = RE_ALT.search(linea)
         if m:
-            self.poner(self.lbl_abs, f"{float(m.group(1)):,.2f} m")
+            altura_absoluta = float(m.group(1))
+            self.ultima_altura_absoluta = altura_absoluta
+            if self.cda_activo and self.altura_inicio_descenso is None:
+                self.altura_inicio_descenso = altura_absoluta
+                self.altura_maxima_desde_cda = altura_absoluta
+            self.poner(self.lbl_abs, f"{altura_absoluta:,.2f} m")
+            self.actualizar_velocidad_caida(altura_absoluta, time.monotonic())
+            if self.cda_activo and self.altura_inicio_descenso is not None:
+                descenso = max(0.0, self.altura_inicio_descenso - altura_absoluta)
+                self.altura_maxima_desde_cda = max(
+                    self.altura_maxima_desde_cda or self.altura_inicio_descenso,
+                    altura_absoluta
+                )
+                ascenso = max(0.0, self.altura_maxima_desde_cda - self.altura_inicio_descenso)
+                self.lbl_descenso_vertical.configure(
+                    text=f"Descenso vertical: {descenso:.2f} m"
+                )
+                self.lbl_ascenso_vertical.configure(
+                    text=f"Ascenso máximo: {ascenso:.2f} m"
+                )
             mr = RE_REL.search(linea)
             rel = mr.group(1) if mr else None
             if rel:
@@ -559,6 +557,7 @@ class App:
             self.poner(self.lbl_rel, t, CIAN)
             self.poner(self.lbl_temp, t)
             self.poner(self.lbl_pres, t)
+            self.lbl_velocidad_caida.configure(text=f"Caída vertical: {t}")
 
         # DHT11
         m = RE_HUM.search(linea)
@@ -582,7 +581,8 @@ class App:
             total = math.sqrt(sum(v * v for v in valores))
             self.lbl_acc_total.configure(text=f"{total:.3f} g | {total * 9.80665:.2f} m/s²")
             self.dibujar_grafico()
-            self.integrar_recorrido(ahora, valores)
+            # No integrar aceleracion para presentar distancia recorrida:
+            # sin orientacion/fusion inercial produce deriva y distancias falsas.
         else:
             for lbl in self.lbl_acc:
                 self.poner(lbl, estado_texto("GY"))
@@ -600,6 +600,53 @@ class App:
         if ms:
             self.lbl_snr.configure(text=f"SNR {float(ms.group(1)):.1f} dB")
         self.log(f"Pkt #{n}  RSSI {mr.group(1) if mr else '--'} dBm")
+
+    def actualizar_velocidad_caida(self, altura, ahora):
+        """Estima velocidad vertical descendente con cambios reales del BMP180."""
+        if self.ultima_altura_velocidad is not None:
+            t_ant, h_ant = self.ultima_altura_velocidad
+            if abs(altura - h_ant) < 0.005:
+                if ahora - t_ant > 2.5:
+                    self.muestras_velocidad_altura = [(ahora, altura)]
+                    self.ultima_altura_velocidad = (ahora, altura)
+                    self.velocidad_caida_filtrada = 0.0
+                    self.lbl_velocidad_caida.configure(text="Caída vertical: 0.00 m/s")
+                return  # valor BMP cacheado en paquetes LoRa intermedios
+            if ahora - t_ant > 2.5:
+                self.muestras_velocidad_altura.clear()
+                self.velocidad_caida_filtrada = None
+
+        self.ultima_altura_velocidad = (ahora, altura)
+        self.muestras_velocidad_altura.append((ahora, altura))
+        self.muestras_velocidad_altura = [
+            muestra for muestra in self.muestras_velocidad_altura
+            if ahora - muestra[0] <= 3.0
+        ]
+        if len(self.muestras_velocidad_altura) < 3:
+            self.lbl_velocidad_caida.configure(text="Caída vertical: calculando…")
+            return
+
+        tiempos = [t for t, _ in self.muestras_velocidad_altura]
+        alturas = [h for _, h in self.muestras_velocidad_altura]
+        centro_t = sum(tiempos) / len(tiempos)
+        centro_h = sum(alturas) / len(alturas)
+        denom = sum((t - centro_t) ** 2 for t in tiempos)
+        if denom <= 0:
+            return
+        pendiente_altura = sum((t - centro_t) * (h - centro_h)
+                               for t, h in self.muestras_velocidad_altura) / denom
+        caida = max(0.0, -pendiente_altura)
+        if caida < 0.15:
+            caida = 0.0  # zona muerta ante ruido de presión en reposo
+        if self.velocidad_caida_filtrada is None:
+            self.velocidad_caida_filtrada = caida
+        else:
+            self.velocidad_caida_filtrada = (
+                0.55 * self.velocidad_caida_filtrada + 0.45 * caida
+            )
+        self.lbl_velocidad_caida.configure(
+            text=f"Caída vertical: {self.velocidad_caida_filtrada:.2f} m/s"
+        )
 
     def registrar_altura(self, altura_relativa):
         if not self.cda_activo:
@@ -636,7 +683,7 @@ class App:
         c.create_line(izq, arriba, izq, abajo, fill=BORDE)
         c.create_line(izq, abajo, der, abajo, fill=BORDE)
         c.create_text(4, arriba, text="g", fill=GRIS, anchor="nw")
-        c.create_text(izq, h - 3, text="−1 s", fill=GRIS, anchor="sw")
+        c.create_text(izq, h - 3, text="−10 s", fill=GRIS, anchor="sw")
         c.create_text(der, h - 3, text="ahora", fill=GRIS, anchor="se")
         for tick in (2, 1, 0, -1, -2):
             ytick = arriba + (2 - tick) / 4 * (abajo - arriba)
@@ -647,7 +694,7 @@ class App:
             else:
                 c.create_line(izq, ytick, der, ytick, fill="#526170")
         ahora = time.time()
-        muestras = [m for m in self.historial_acc if ahora - m[0] <= 1.0]
+        muestras = [m for m in self.historial_acc if ahora - m[0] <= 10.0]
         if not muestras:
             c.create_text((izq + der) / 2, (arriba + abajo) / 2,
                           text="Esperando acelerómetro…", fill=GRIS)
@@ -658,7 +705,7 @@ class App:
                 continue
             puntos = []
             for muestra in muestras:
-                x = der - min(1.0, max(0.0, ahora - muestra[0])) * (der - izq)
+                x = der - min(10.0, max(0.0, ahora - muestra[0])) / 10.0 * (der - izq)
                 val = max(-2.0, min(2.0, muestra[idx]))
                 y = arriba + (2.0 - val) / 4.0 * (abajo - arriba)
                 puntos.extend((x, y))
@@ -683,7 +730,7 @@ class App:
         canvas.create_line(izq, arriba, izq, abajo, fill=BORDE)
         canvas.create_line(izq, abajo, der, abajo, fill=BORDE)
         canvas.create_text(3, arriba, text=unidad, fill=GRIS, anchor="nw")
-        canvas.create_text(izq, h - 3, text="−1 s", fill=GRIS, anchor="sw")
+        canvas.create_text(izq, h - 3, text="−10 s", fill=GRIS, anchor="sw")
         canvas.create_text(der, h - 3, text="ahora", fill=GRIS, anchor="se")
         minimo, maximo = (0.0, 50.0) if unidad == "°C" else (0.0, 100.0)
         marcas = (0, 10, 20, 30, 40, 50) if unidad == "°C" else (0, 25, 50, 75, 100)
@@ -692,14 +739,14 @@ class App:
             canvas.create_text(izq - 4, ymarca, text=str(marca), fill=GRIS, anchor="e")
             canvas.create_line(izq, ymarca, der, ymarca, fill="#35404d", dash=(2, 3))
         ahora = time.time()
-        muestras = [m for m in historial if ahora - m[0] <= 1.0]
+        muestras = [m for m in historial if ahora - m[0] <= 10.0]
         if not muestras:
             canvas.create_text((izq + der) / 2, (arriba + abajo) / 2,
                                text="Esperando datos…", fill=GRIS)
             return
         puntos = []
         for t, valor in muestras:
-            x = der - min(1.0, max(0.0, ahora - t)) * (der - izq)
+            x = der - min(10.0, max(0.0, ahora - t)) / 10.0 * (der - izq)
             valor = max(minimo, min(maximo, valor))
             y = abajo - (valor - minimo) / (maximo - minimo) * (abajo - arriba)
             puntos.extend((x, y))
@@ -711,6 +758,9 @@ class App:
 
     def procesar(self, linea):
         if RE_PKT.match(linea):
+            if "CAMARA: INICIADA" in linea and not self.cda_activo:
+                self.activar_cda()
+                self.lbl_cmd.configure(text="Switch detectado · CDA iniciado")
             self.procesar_paquete(linea)
             return
         m = RE_PISO.search(linea)
@@ -749,9 +799,9 @@ class App:
 
         ok = self.ultimo_rx is not None and (time.time() - self.ultimo_rx) < TIMEOUT_COMUNICACION
         if ok:
-            self.badge.configure(text="Comunicación: True", bg=VERDE_BG, fg=VERDE)
+            self.badge.configure(text="Comunicación: Online", bg=VERDE_BG, fg=VERDE)
         else:
-            self.badge.configure(text="Comunicación: False", bg=ROJO_BG, fg=ROJO)
+            self.badge.configure(text="Comunicación: Offline", bg=ROJO_BG, fg=ROJO)
 
         if hasattr(self, "canvas_acc"):
             self.dibujar_grafico()

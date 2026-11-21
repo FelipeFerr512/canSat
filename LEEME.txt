@@ -20,21 +20,31 @@ la Heltec. La interfaz requiere pyserial y tkinter (normalmente incluido con
 Python). Los graficos se dibujan con tkinter; matplotlib no es necesario.
 
 Comandos remotos desde la interfaz/Heltec
-- S0 a S180: sentido/velocidad del SG90 360 (S90 suele detenerlo; calibrar).
+- S0 a S180: posicion del SG90 estandar (0° a 180°); al arrancar queda en 90°.
+- Switch entre D5 y GND: después de armar con CDA, debe detectarse cerrado y
+  luego abrirse estable durante 2 s para mover el servo a 180°. Un D5 flotante
+  o desconectado no lo acciona. Una activación por cada CDA.
+- CDA en la interfaz arma el accionamiento automático; DESARME lo bloquea y
+  queda enclavado aunque se vuelva a pulsar CDA. REARME libera el bloqueo.
+  DESARME no bloquea los comandos manuales S0..S180. Al reiniciar, queda desarmado.
 - FLOOR: fija como cero la ultima altura BMP recibida.
+- BZ: alterna el buzzer activo HYDZ conectado a D3 y GND del nodo (apagado al iniciar).
 
 Los controles DHT/BMP/GY y Mostrar todos/Ocultar todos de la interfaz solo
 muestran u ocultan paneles localmente; no envian comandos de radio.
 El nodo intenta transmitir cada 200 ms (hasta 5 paquetes por segundo).
 Para evitar colisiones, la Heltec solo transmite comandos despues de cada quinto
 paquete de telemetria (ventana de subida, aproximadamente una vez por segundo).
+El nodo reserva hasta 400 ms despues de ese paquete para recibir el comando;
+esto puede reducir ligeramente la cadencia efectiva durante ese intervalo.
+La Heltec envia tres copias con la misma secuencia por ventana y reintenta en
+hasta ocho ventanas; el nodo deduplica la secuencia para que comandos toggle
+como BZ solo se ejecuten una vez.
 La confirmacion vuelve incluida en el siguiente paquete normal; no se envia una
 respuesta LoRa adicional. Esto conserva la cadencia de telemetria y limita los
 comandos a una frecuencia adecuada para controles y cambios de sensores.
 El DHT11 se consulta cada 2 s y se repite su ultima lectura en los paquetes
 intermedios; el BMP se consulta cada 1 s. El acelerometro se lee en cada ciclo.
-El SG90 de rotacion continua no puede fijar un angulo: S0..S180 gobierna
-sentido/velocidad, y el punto de parada cercano a S90 puede requerir calibracion.
 
 Diagnostico del BMP180
 El nodo imprime “Aviso: no se encuentra el BMP180” si bmp.begin() falla y
